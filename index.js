@@ -388,13 +388,17 @@ app.use(async (req, res, next) => {
 
 function loginRequired(req, res, next) {
   if (!req.user) {
-    if (req.xhr || req.headers.accept.indexOf('json') > -1) {
+    const accept = req.headers.accept || ""; // Prevent undefined
+
+    if (req.xhr || accept.includes("json")) {
       return res.status(401).json({ error: "Authentication required" });
     }
+
     return res.redirect("/login");
   }
   next();
 }
+s
 
 // ==========================================
 // 4. AUTH & USER ROUTES
