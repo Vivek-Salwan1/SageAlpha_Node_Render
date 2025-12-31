@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "📌 Installing wkhtmltopdf for Azure..."
+echo "📌 Installing wkhtmltopdf..."
 
 apt-get update -y
 apt-get install -y wget xvfb
