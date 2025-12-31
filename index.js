@@ -881,7 +881,7 @@ Do not include any other text or markdown formatting.`;
 function getBaseUrl(req) {
   if (IS_PRODUCTION) {
     return process.env.BACKEND_URL || process.env.WEBSITE_HOSTNAME
-      ? `https://${process.env.WEBSITE_HOSTNAME || process.env.BACKEND_URL}`
+      ? `${process.env.WEBSITE_HOSTNAME || process.env.BACKEND_URL}`
       : `${req.protocol}://${req.get('host')}`;
   } else {
     const protocol = req.protocol || 'http';
@@ -1565,6 +1565,7 @@ app.post("/upload", loginRequired, upload.single("file"), (req, res) => {
 
 app.get("/reports/download/:id", async (req, res) => {
   try {
+    console.log("[Download] Report download requested");
     const reportId = req.params.id.replace(/[^\w\-_]/g, "_");
     const filePath = path.join(REPORTS_DIR, `${reportId}.html`);
 
