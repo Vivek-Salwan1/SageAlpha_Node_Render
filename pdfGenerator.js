@@ -46,11 +46,10 @@ function getWkhtmltopdfPath() {
     }
   } 
   else {
-    // 3️⃣ Linux / Azure paths
+    // 3️⃣ Linux / Render paths
     const linuxPaths = [
       "/usr/local/bin/wkhtmltopdf",
       "/usr/bin/wkhtmltopdf",
-      "/usr/bin/xvfb-run wkhtmltopdf", // For headless on Azure
       path.join(process.cwd(), "bin/wkhtmltopdf"),
       "wkhtmltopdf",
     ];
@@ -140,9 +139,12 @@ Or set WKHTMLTOPDF_PATH environment variable to the full path of wkhtmltopdf bin
  * @returns {Promise<Buffer>} PDF buffer
  */
 async function convertHtmlToPdf(htmlContent) {
+  console.log(`[PDF] Starting PDF conversion, HTML content length: ${htmlContent.length} bytes`);
   const wkhtmltopdfPath = getWkhtmltopdfPath();
+  console.log(`[PDF] Using wkhtmltopdf path: ${wkhtmltopdfPath}`);
   
   // Verify wkhtmltopdf is available before proceeding
+  console.log(`[PDF] Verifying wkhtmltopdf installation...`);
   const isAvailable = await verifyWkhtmltopdfInstallation(wkhtmltopdfPath);
   if (!isAvailable) {
     const instructions = getInstallationInstructions();
@@ -150,6 +152,7 @@ async function convertHtmlToPdf(htmlContent) {
     console.error(`[PDF] Installation instructions: ${instructions}`);
     throw new Error(`wkhtmltopdf is not installed or not found. Please install wkhtmltopdf or set WKHTMLTOPDF_PATH environment variable. See server logs for installation instructions.`);
   }
+  console.log(`[PDF] wkhtmltopdf verification passed`);
   
   // Create temporary files
   const tempDir = os.tmpdir();
@@ -216,8 +219,17 @@ async function convertHtmlToPdf(htmlContent) {
 
   } catch (error) {
     console.error(`[PDF] Conversion error:`, error.message);
-    console.error(`[PDF] Command output:`, error.stdout || '');
-    console.error(`[PDF] Command error:`, error.stderr || '');
+    console.error(`[PDF] Error stack:`, error.stack);
+    if (error.stdout) {
+      console.error(`[PDF] Command stdout:`, error.stdout);
+    }
+    if (error.stderr) {
+      console.error(`[PDF] Command stderr:`, error.stderr);
+    }
+    console.error(`[PDF] wkhtmltopdf path used: ${wkhtmltopdfPath}`);
+    console.error(`[PDF] tempDir: ${tempDir}`);
+    console.error(`[PDF] tempHtmlFile: ${tempHtmlFile}`);
+    console.error(`[PDF] tempPdfFile: ${tempPdfFile}`);
     
     // Check if error is due to command not found
     const errorMsg = error.message || '';

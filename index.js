@@ -9,8 +9,8 @@
 // ==========================================
 const path = require("path");
 const dotenv = require("dotenv").config();
-// Azure-safe Playwright browser path (use /tmp in production for writable location)
-const IS_PRODUCTION = process.env.WEBSITE_SITE_NAME ? true : (process.env.NODE_ENV === 'production');
+// Production detection (Render sets RENDER env var, Azure sets WEBSITE_SITE_NAME)
+const IS_PRODUCTION = process.env.RENDER || process.env.WEBSITE_SITE_NAME ? true : (process.env.NODE_ENV === 'production');
 const PLAYWRIGHT_BROWSERS_PATH = IS_PRODUCTION
   ? (process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(process.env.TMPDIR || '/tmp', 'playwright-browsers'))
   : path.join(__dirname, 'playwright-browsers');
@@ -1568,15 +1568,23 @@ app.get("/reports/download/:id", async (req, res) => {
     const reportId = req.params.id.replace(/[^\w\-_]/g, "_");
     const filePath = path.join(REPORTS_DIR, `${reportId}.html`);
 
+    console.log(`[Download] Request for report ID: ${reportId}`);
+    console.log(`[Download] Looking for file at: ${filePath}`);
+    console.log(`[Download] REPORTS_DIR: ${REPORTS_DIR}`);
+
     if (!fs.existsSync(filePath)) {
+      console.error(`[Download] File not found: ${filePath}`);
       return res.status(404).send("Report not found");
     }
 
     // Read HTML content directly from file
     const htmlContent = fs.readFileSync(filePath, 'utf8');
-    console.log("[Download] Converting HTML to PDF from file:", filePath);
+    console.log(`[Download] HTML file read successfully (${htmlContent.length} bytes)`);
+    console.log(`[Download] Converting HTML to PDF from file: ${filePath}`);
 
     const pdf = await convertHtmlToPdf(htmlContent);
+
+    console.log(`[Download] PDF generated successfully (${pdf.length} bytes)`);
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
@@ -1588,7 +1596,11 @@ app.get("/reports/download/:id", async (req, res) => {
 
   } catch (err) {
     console.error("[Download] Endpoint Error:", err.message);
-    return res.status(500).send("PDF generation failed");
+    console.error("[Download] Error stack:", err.stack);
+    return res.status(500).json({ 
+      error: "PDF generation failed", 
+      message: err.message 
+    });
   }
 });
 
