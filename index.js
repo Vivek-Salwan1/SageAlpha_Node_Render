@@ -1665,90 +1665,111 @@ app.get("/reports/preview/:id", async (req, res) => {
 app.get("/reports/edit/:id", loginRequired, async (req, res) => {
   try {
     const reportId = req.params.id.replace(/[^\w\-_]/g, "_");
-    
-    // Verify report belongs to user
+
     const userId = req.user._id ? req.user._id : req.user.id;
-    let report = null;
-    
-    if (mongooseConnected) {
-      report = await Report.findOne({ 
-        report_data: reportId, 
-        user_id: userId 
-      });
-    } else {
-      report = db.prepare("SELECT * FROM reports WHERE report_data = ? AND user_id = ?")
-        .get(reportId, userId);
-    }
-    
+    const report = await Report.findOne({ 
+      report_data: reportId, 
+      user_id: userId 
+    });
+
     if (!report) {
       return res.status(404).json({ error: "Report not found or access denied" });
     }
-    
-    // Get HTML content from Azure Blob Storage
-    const htmlContent = await getHtmlFromBlob(reportId);
-    
-    if (!htmlContent) {
+
+    // Get original HTML content
+    const fullHtml = await getHtmlFromBlob(reportId);
+    if (!fullHtml) {
       return res.status(404).json({ error: "Report HTML not found in storage" });
     }
-    
-    res.json({ html: htmlContent, reportId });
+
+    // Strip everything outside <body>
+    const bodyMatch = fullHtml.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+    const previewHtml = bodyMatch ? bodyMatch[1] : fullHtml;
+
+    res.json({
+      html: previewHtml,  // Send only body content
+      reportId
+    });
+
   } catch (err) {
-    console.error("[Edit] Error reading HTML:", err.message);
-    res.status(500).json({ error: "Error reading report HTML" });
+    console.error("[Preview] Error:", err.message);
+    res.status(500).json({ error: "Error generating preview" });
   }
 });
 
+
 // Save updated HTML and regenerate PDF
-// Save updated HTML and regenerate PDF
+// Save updated HTML and regenerate full report HTML
 app.put("/reports/edit/:id", loginRequired, async (req, res) => {
   try {
     const reportId = req.params.id.replace(/[^\w\-_]/g, "_");
     const { html } = req.body;
-    
+
     if (!html || typeof html !== 'string') {
       return res.status(400).json({ error: "HTML content is required" });
     }
-    
-    // Verify report belongs to user
+
     const userId = req.user._id ? req.user._id : req.user.id;
-    let report = null;
-    
-    if (mongooseConnected) {
-      report = await Report.findOne({ 
-        report_data: reportId, 
-        user_id: userId 
-      });
-    } else {
-      report = db.prepare("SELECT * FROM reports WHERE report_data = ? AND user_id = ?")
-        .get(reportId, userId);
-    }
-    
+    const report = await Report.findOne({ 
+      report_data: reportId,
+      user_id: userId
+    });
+
     if (!report) {
       return res.status(404).json({ error: "Report not found or access denied" });
     }
-    
-    // Upload updated HTML to Azure Blob Storage
-    const blobFileName = await uploadHtmlToBlob(reportId, html);
-    console.log(`[Edit] Updated HTML uploaded to blob: ${blobFileName}`);
-    
-    // Update report_path in database (should already be set, but ensure it's correct)
-    if (mongooseConnected) {
-      await Report.updateOne(
-        { report_data: reportId, user_id: userId },
-        { report_path: blobFileName }
-      );
+
+    // Get original full HTML from blob storage to extract head/styles
+    const originalHtml = await getHtmlFromBlob(reportId);
+    if (!originalHtml) {
+      return res.status(404).json({ error: "Original report HTML not found in storage" });
     }
+
+    // Extract head section (including styles) from original HTML
+    const headMatch = originalHtml.match(/<head[^>]*>([\s\S]*?)<\/head>/i);
+    const headContent = headMatch ? headMatch[1] : '<meta charset="UTF-8">';
     
-    res.json({ 
-      success: true, 
-      message: "Report updated successfully",
-      reportId 
+    // Extract html tag attributes (like lang="en") if present
+    const htmlTagMatch = originalHtml.match(/<html\s+([^>]*)>/i);
+    const htmlAttributes = htmlTagMatch && htmlTagMatch[1].trim() ? htmlTagMatch[1] : 'lang="en"';
+    
+    // Extract DOCTYPE if present
+    const doctypeMatch = originalHtml.match(/<!DOCTYPE[^>]*>/i);
+    const doctype = doctypeMatch ? doctypeMatch[0] : '<!DOCTYPE html>';
+
+    // Reconstruct full HTML with original head/styles and new body content
+    const fullHtml = `${doctype}
+<html ${htmlAttributes}>
+<head>
+${headContent}
+</head>
+<body>
+${html}
+</body>
+</html>`;
+
+    // Upload updated full HTML back to Blob
+    const blobFileName = await uploadHtmlToBlob(reportId, fullHtml);
+    console.log(`[Edit] Report updated and wrapped with complete HTML (preserved original styles)`);
+
+    // Ensure DB is updated if required
+    await Report.updateOne(
+      { report_data: reportId, user_id: userId },
+      { report_path: blobFileName }
+    );
+
+    res.json({
+      success: true,
+      message: "Report updated & formatted successfully",
+      reportId
     });
+
   } catch (err) {
-    console.error("[Edit] Error saving HTML:", err.message);
-    res.status(500).json({ error: "Error saving report" });
+    console.error("[Edit] Error saving report:", err.message);
+    res.status(500).json({ error: "Error saving report HTML" });
   }
 });
+
 
 // Send reports to subscribers via email
 app.post("/reports/send", loginRequired, async (req, res) => {
