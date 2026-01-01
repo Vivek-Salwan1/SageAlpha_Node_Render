@@ -32,6 +32,7 @@ const fs = require("fs");
 const { OpenAI, AzureOpenAI } = require("openai");
 const { generateReportHtml } = require("./reportTemplate");
 const { convertHtmlToPdf } = require("./pdfGenerator");
+const { uploadHtmlToBlob, getHtmlFromBlob, deleteHtmlFromBlob } = require("./utils/blobStorage");
 
 
 // Mongoose models (wilFl be required after connecting)
@@ -78,9 +79,9 @@ const DATA_DIR = IS_PRODUCTION
   ? (process.env.DATA_DIR || path.join(process.env.TMPDIR || '/tmp', 'sagealpha-data'))
   : __dirname;
 
-const REPORTS_DIR = IS_PRODUCTION
-  ? (process.env.REPORTS_DIR || path.join(DATA_DIR, 'generated_reports'))
-  : path.join(__dirname, "generated_reports");
+// const REPORTS_DIR = IS_PRODUCTION
+//   ? (process.env.REPORTS_DIR || path.join(DATA_DIR, 'generated_reports'))
+//   : path.join(__dirname, "generated_reports");
 
 const UPLOADS_DIR = IS_PRODUCTION
   ? (process.env.UPLOADS_DIR || path.join(DATA_DIR, 'uploads'))
@@ -91,7 +92,7 @@ const VECTOR_STORE_DIR = IS_PRODUCTION
   : path.join(__dirname, "vector_store_data");
 
 // Ensure directories exist
-[REPORTS_DIR, UPLOADS_DIR, VECTOR_STORE_DIR].forEach(dir => {
+[UPLOADS_DIR, VECTOR_STORE_DIR].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -1430,11 +1431,10 @@ app.post("/chat/create-report", loginRequired, async (req, res) => {
 
     const safeCompanyName = company_name.replace(/ /g, "_").replace(/[^\w]/g, "").toLowerCase();
     const reportId = `${safeCompanyName}_${Date.now()}`;
-    const htmlFilename = `${reportId}.html`;
-    const htmlFilepath = path.join(REPORTS_DIR, htmlFilename);
 
-    // Save HTML file to disk (for editing and PDF generation)
-    fs.writeFileSync(htmlFilepath, reportHtml);
+    // Upload HTML to Azure Blob Storage
+    const blobFileName = await uploadHtmlToBlob(reportId, reportHtml);
+    console.log(`[Report] HTML uploaded to blob: ${blobFileName}`);
 
     // Generate download URL using helper function
     const baseUrl = getBaseUrl(req);
@@ -1449,12 +1449,13 @@ app.post("/chat/create-report", loginRequired, async (req, res) => {
         user_id: userId,
         title: `Equity Research Note – ${company_name}`,
         status: 'pending',
-        report_path: htmlFilepath,
+        report_path: blobFileName, // Store blob filename (e.g., "reportId.html")
         report_data: reportId, // Store report ID for reference (used to generate download URL)
         report_type: 'equity_research',
         report_date: new Date(),
         created_at: new Date()
       });
+    
 
       // Save chat history
       if (!session_id) {
@@ -1513,6 +1514,7 @@ app.post("/reports/:id/approve", loginRequired, async (req, res) => {
 });
 
 // Delete report endpoint
+// Delete report endpoint
 app.post("/reports/:id/delete", loginRequired, async (req, res) => {
   const reportId = req.params.id;
   const userId = req.user._id;
@@ -1527,12 +1529,13 @@ app.post("/reports/:id/delete", loginRequired, async (req, res) => {
       return res.status(404).json({ error: "Report not found" });
     }
 
-    // Delete the HTML file if it exists
-    if (report.report_path && fs.existsSync(report.report_path)) {
+    // Delete the HTML blob from Azure Blob Storage
+    if (report.report_data) {
       try {
-        fs.unlinkSync(report.report_path);
-      } catch (fileErr) {
-        console.warn("[Report] Failed to delete file:", fileErr.message);
+        await deleteHtmlFromBlob(report.report_data);
+      } catch (blobErr) {
+        console.warn("[Report] Failed to delete blob:", blobErr.message);
+        // Continue with DB deletion even if blob deletion fails
       }
     }
 
@@ -1544,7 +1547,6 @@ app.post("/reports/:id/delete", loginRequired, async (req, res) => {
     res.status(500).json({ error: "Failed to delete report" });
   }
 });
-
 // Azure-safe upload directory
 const upload = multer({
   dest: UPLOADS_DIR,
@@ -1565,24 +1567,22 @@ app.post("/upload", loginRequired, upload.single("file"), (req, res) => {
 
 app.get("/reports/download/:id", async (req, res) => {
   try {
-    console.log("[Download] Report download requested");
     const reportId = req.params.id.replace(/[^\w\-_]/g, "_");
-    const filePath = path.join(REPORTS_DIR, `${reportId}.html`);
 
     console.log(`[Download] Request for report ID: ${reportId}`);
-    console.log(`[Download] Looking for file at: ${filePath}`);
-    console.log(`[Download] REPORTS_DIR: ${REPORTS_DIR}`);
 
-    if (!fs.existsSync(filePath)) {
-      console.error(`[Download] File not found: ${filePath}`);
-      return res.status(404).send("Report not found");
+    // Get HTML content from Azure Blob Storage
+    const htmlContent = await getHtmlFromBlob(reportId);
+    
+    if (!htmlContent) {
+      console.error(`[Download] HTML blob not found for report ID: ${reportId}`);
+      return res.status(404).json({ error: "Report not found" });
     }
 
-    // Read HTML content directly from file
-    const htmlContent = fs.readFileSync(filePath, 'utf8');
-    console.log(`[Download] HTML file read successfully (${htmlContent.length} bytes)`);
-    console.log(`[Download] Converting HTML to PDF from file: ${filePath}`);
+    console.log(`[Download] HTML content retrieved from blob (${htmlContent.length} bytes)`);
+    console.log(`[Download] Converting HTML to PDF`);
 
+    // Convert HTML to PDF
     const pdf = await convertHtmlToPdf(htmlContent);
 
     console.log(`[Download] PDF generated successfully (${pdf.length} bytes)`);
@@ -1607,13 +1607,16 @@ app.get("/reports/download/:id", async (req, res) => {
 
 
 
+
 // Serve HTML files publicly
-app.get("/reports/html/:id", (req, res) => {
+app.get("/reports/html/:id", async (req, res) => {
   try {
     const reportId = req.params.id.replace(/[^\w\-_]/g, "_");
-    const filePath = path.join(REPORTS_DIR, `${reportId}.html`);
     
-    if (!fs.existsSync(filePath)) {
+    // Get HTML content from Azure Blob Storage
+    const htmlContent = await getHtmlFromBlob(reportId);
+    
+    if (!htmlContent) {
       return res.status(404).send("Report not found");
     }
     
@@ -1621,8 +1624,9 @@ app.get("/reports/html/:id", (req, res) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
     
-    res.sendFile(path.resolve(filePath));
+    res.send(htmlContent);
   } catch (err) {
     console.error("[HTML] Error serving file:", err.message);
     res.status(500).send("Error serving HTML file");
@@ -1631,18 +1635,19 @@ app.get("/reports/html/:id", (req, res) => {
 
 
 // Preview endpoint - serves PDF inline for preview
+// Preview endpoint - serves PDF inline for preview
 app.get("/reports/preview/:id", async (req, res) => {
   try {
     const reportId = req.params.id.replace(/[^\w\-_]/g, "_");
-    const filePath = path.join(REPORTS_DIR, `${reportId}.html`);
 
-    if (!fs.existsSync(filePath)) {
+    // Get HTML content from Azure Blob Storage
+    const htmlContent = await getHtmlFromBlob(reportId);
+    
+    if (!htmlContent) {
       return res.status(404).json({ error: "Report not found" });
     }
 
-    // Read HTML content directly from file
-    const htmlContent = fs.readFileSync(filePath, 'utf8');
-    console.log("[Preview] Converting HTML to PDF from file:", filePath);
+    console.log("[Preview] Converting HTML to PDF from blob");
     const pdfBuffer = await convertHtmlToPdf(htmlContent);
 
     res.setHeader("Content-Type", "application/pdf");
@@ -1656,14 +1661,10 @@ app.get("/reports/preview/:id", async (req, res) => {
 });
 
 // Get HTML content for editing
+// Get HTML content for editing
 app.get("/reports/edit/:id", loginRequired, async (req, res) => {
   try {
     const reportId = req.params.id.replace(/[^\w\-_]/g, "_");
-    const filePath = path.join(REPORTS_DIR, `${reportId}.html`);
-    
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: "Report not found" });
-    }
     
     // Verify report belongs to user
     const userId = req.user._id ? req.user._id : req.user.id;
@@ -1683,7 +1684,13 @@ app.get("/reports/edit/:id", loginRequired, async (req, res) => {
       return res.status(404).json({ error: "Report not found or access denied" });
     }
     
-    const htmlContent = fs.readFileSync(filePath, "utf8");
+    // Get HTML content from Azure Blob Storage
+    const htmlContent = await getHtmlFromBlob(reportId);
+    
+    if (!htmlContent) {
+      return res.status(404).json({ error: "Report HTML not found in storage" });
+    }
+    
     res.json({ html: htmlContent, reportId });
   } catch (err) {
     console.error("[Edit] Error reading HTML:", err.message);
@@ -1691,6 +1698,7 @@ app.get("/reports/edit/:id", loginRequired, async (req, res) => {
   }
 });
 
+// Save updated HTML and regenerate PDF
 // Save updated HTML and regenerate PDF
 app.put("/reports/edit/:id", loginRequired, async (req, res) => {
   try {
@@ -1719,13 +1727,17 @@ app.put("/reports/edit/:id", loginRequired, async (req, res) => {
       return res.status(404).json({ error: "Report not found or access denied" });
     }
     
-    const filePath = path.join(REPORTS_DIR, `${reportId}.html`);
+    // Upload updated HTML to Azure Blob Storage
+    const blobFileName = await uploadHtmlToBlob(reportId, html);
+    console.log(`[Edit] Updated HTML uploaded to blob: ${blobFileName}`);
     
-    // Save updated HTML
-    fs.writeFileSync(filePath, html, "utf8");
-    
-    // Regenerate PDF (optional - can be done on-demand)
-    // The PDF will be regenerated when accessed via /reports/download/:id
+    // Update report_path in database (should already be set, but ensure it's correct)
+    if (mongooseConnected) {
+      await Report.updateOne(
+        { report_data: reportId, user_id: userId },
+        { report_path: blobFileName }
+      );
+    }
     
     res.json({ 
       success: true, 
@@ -1791,50 +1803,34 @@ app.post("/reports/send", loginRequired, async (req, res) => {
       // Process each report for this subscriber
       for (const reportData of reports) {
         try {
-          const reportId = reportData.report_data || reportData._id;
-          console.log(`[Send Report] Processing report:`, {
-            reportId: reportId,
-            reportData_id: reportData._id,
-            reportData_report_data: reportData.report_data,
-            title: reportData.title,
-            company_name: reportData.company_name
-          });
+          // Extract report ID from reportData (could be report_data or _id)
+          const reportId = reportData.report_data || reportData._id?.toString() || reportData.id?.toString();
           
           if (!reportId) {
-            errors.push({ email: subscriberEmail, report: reportData.title || "Unknown", error: "Report ID missing" });
+            errors.push({
+              email: subscriberEmail,
+              report: reportData.title || "Unknown",
+              error: "Report ID not found"
+            });
             continue;
           }
 
-          // Get report file path
+          // Get report HTML from Azure Blob Storage
           let pdfBuffer;
           try {
             // Sanitize report ID to match the file naming convention used when saving
             const safeReportId = String(reportId).replace(/[^\w\-_]/g, "_");
             
-            // Try to get report path from report data or construct from report ID
-            let reportFilePath = reportData.report_path;
+            // Get HTML content from Azure Blob Storage
+            const htmlContent = await getHtmlFromBlob(safeReportId);
             
-            if (!reportFilePath) {
-              // Construct file path from report ID (must match the sanitization used in edit endpoint)
-              reportFilePath = path.join(REPORTS_DIR, `${safeReportId}.html`);
+            if (!htmlContent) {
+              throw new Error(`Report HTML not found in blob storage for ID: ${safeReportId}`);
             }
 
-            // Check if HTML file exists, if so, convert to PDF
-            if (fs.existsSync(reportFilePath)) {
-              // Read HTML content directly from file
-              // This ensures we get the most up-to-date version after edits
-              const htmlContent = fs.readFileSync(reportFilePath, 'utf8');
-              console.log(`[Send Report] Converting HTML to PDF for report ${safeReportId} from file: ${reportFilePath}`);
-              pdfBuffer = await convertHtmlToPdf(htmlContent);
-            } else {
-              // Try PDF file directly
-              const pdfFilePath = reportFilePath.replace('.html', '.pdf');
-              if (fs.existsSync(pdfFilePath)) {
-                pdfBuffer = fs.readFileSync(pdfFilePath);
-              } else {
-                throw new Error(`Report file not found: ${reportFilePath}`);
-              }
-            }
+            // Convert HTML to PDF
+            console.log(`[Send Report] Converting HTML to PDF for report ${safeReportId}`);
+            pdfBuffer = await convertHtmlToPdf(htmlContent);
           } catch (fileError) {
             console.error(`[Send Report] Error reading PDF for report ${reportId}:`, fileError);
             errors.push({ 
@@ -2198,7 +2194,7 @@ app.use((err, req, res, next) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[SageAlpha Node] Server running on port ${PORT}`);
   console.log(`[SageAlpha Node] Environment: ${IS_PRODUCTION ? 'PRODUCTION' : 'DEVELOPMENT'}`);
-  console.log(`[SageAlpha Node] Reports Dir: ${REPORTS_DIR}`);
+  console.log(`[SageAlpha Node] HTML Reports Storage: Azure Blob Storage (Container: ${process.env.AZURE_CONTAINER_NAME || 'equity-html-reports'})`);
   console.log(`[SageAlpha Node] Uploads Dir: ${UPLOADS_DIR}`);
   if (!IS_PRODUCTION) {
     console.log(`[SageAlpha Node] Local URL: http://localhost:${PORT}`);
