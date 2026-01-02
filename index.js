@@ -1924,13 +1924,35 @@ app.post("/reports/send", loginRequired, async (req, res) => {
             to: subscriberEmail,
             subject: `📊 ${reportTitle} - SageAlpha Research`,
             html: `
-              <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-                <p>Dear ${subscriber.name || "Subscriber"},</p>
-                <p>Please find attached our latest equity research report:</p>
-                <h3>${reportTitle}</h3>
-                <p>Company: <strong>${companyName}</strong></p>
-                <p>Regards,<br><strong>SageAlpha Research Team</strong></p>
-              </div>
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <meta charset="utf-8">
+                <style>
+                  body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
+                </style>
+              </head>
+              <body>
+                <!-- Header with gradient background -->
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center;">
+                  <div style="display: inline-block; color: white; font-size: 24px; font-weight: bold;">
+                    <span style="font-size: 28px; margin-right: 10px;">📊</span>
+                    <span>SageAlpha Research Report</span>
+                  </div>
+                </div>
+                
+                <!-- Email body -->
+                <div style="background: #ffffff; padding: 30px; font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                  <p>Dear ${subscriber.name || 'Valued Subscriber'},</p>
+                  <p>We are pleased to share with you our latest equity research report:</p>
+                  <h2 style="color: #333; margin: 20px 0;">${reportTitle}</h2>
+                  <p>This comprehensive report contains detailed analysis, financial insights, and investment recommendations for <strong>${companyName}</strong>.</p>
+                  <p>The PDF report is attached to this email for your review.</p>
+                  <p>If you have any questions or need further assistance, please don't hesitate to contact us.</p>
+                  <p style="margin-top: 30px;">Best regards,<br><strong>SageAlpha Research Team</strong></p>
+                </div>
+              </body>
+              </html>
             `,
             attachments: [
               {
