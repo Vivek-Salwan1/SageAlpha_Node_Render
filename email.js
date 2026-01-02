@@ -1,56 +1,71 @@
-const nodemailer = require("nodemailer");
+/**
+ * Email service using Brevo Transactional Email API
+ * Replaces Nodemailer / SMTP completely (Render-safe)
+ */
+
+const SibApiV3Sdk = require("sib-api-v3-sdk");
 
 // Read env vars
-const SMTP_HOST = process.env.SMTP_HOST;
-const SMTP_PORT = process.env.SMTP_PORT
-  ? parseInt(process.env.SMTP_PORT, 10)
-  : 465;
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS;
-const SMTP_SECURE =
-  process.env.SMTP_SECURE === "true" || SMTP_PORT === 465;
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const EMAIL_FROM = process.env.EMAIL_FROM || "noreply@sagealpha.ai";
+const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "SageAlpha Research";
 
 // Validate config
-const isEmailConfigured =
-  SMTP_HOST && SMTP_USER && SMTP_PASS;
+const isEmailConfigured = !!BREVO_API_KEY;
 
-let transporter = null;
+let emailClient = null;
 
 if (isEmailConfigured) {
   try {
-    transporter = nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: SMTP_PORT,
-      secure: SMTP_SECURE, // ✅ true for 465
-      auth: {
-        user: SMTP_USER,
-        pass: SMTP_PASS,
-      },
-      tls: {
-        servername: SMTP_HOST,
-        rejectUnauthorized: true, // ✅ keep true in production
-      },
-      connectionTimeout: 20000,
-      greetingTimeout: 20000,
-      socketTimeout: 20000,
-    });
+    const client = SibApiV3Sdk.ApiClient.instance;
+    client.authentications["api-key"].apiKey = BREVO_API_KEY;
 
-    // Verify async (non-blocking)
-    transporter.verify((error) => {
-      if (error) {
-        console.warn("[EMAIL] SMTP verification failed:", error.message);
-        console.warn("[EMAIL] This usually means outbound SMTP is blocked or TLS failed");
-      } else {
-        console.log("[EMAIL] ✓ SMTP server is ready to send emails");
-      }
-    });
+    emailClient = new SibApiV3Sdk.TransactionalEmailsApi();
+
+    console.log("[EMAIL] ✓ Brevo email service initialized");
   } catch (err) {
-    console.error("[EMAIL] Failed to create transporter:", err.message);
-    transporter = null;
+    console.error("[EMAIL] Failed to initialize Brevo email service:", err.message);
+    emailClient = null;
   }
 } else {
-  console.warn("[EMAIL] SMTP configuration missing");
-  console.warn("[EMAIL] Required: SMTP_HOST, SMTP_USER, SMTP_PASS");
+  console.warn("[EMAIL] Brevo email not configured");
+  console.warn("[EMAIL] Required: BREVO_API_KEY");
 }
 
-module.exports = transporter;
+/**
+ * Send email with optional attachments
+ * @param {Object} options
+ * @param {string} options.to
+ * @param {string} options.subject
+ * @param {string} options.html
+ * @param {Array}  options.attachments [{ filename, content (Buffer) }]
+ */
+async function sendEmail({ to, subject, html, attachments = [] }) {
+  if (!emailClient) {
+    throw new Error("Email service not configured");
+  }
+
+  const payload = {
+    sender: {
+      email: EMAIL_FROM,
+      name: EMAIL_FROM_NAME,
+    },
+    to: [{ email: to }],
+    subject,
+    htmlContent: html,
+  };
+
+  if (attachments.length > 0) {
+    payload.attachment = attachments.map(att => ({
+      name: att.filename,
+      content: att.content.toString("base64"),
+    }));
+  }
+
+  return emailClient.sendTransacEmail(payload);
+}
+
+module.exports = {
+  sendEmail,
+  isEmailConfigured,
+};

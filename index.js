@@ -59,7 +59,9 @@ const PORT = process.env.PORT || 8000;
 
 // email setup
 const speakeasy = require("speakeasy");
-const transporter = require("./email");
+// const transporter = require("./email");
+const { sendEmail, isEmailConfigured } = require("./email");
+
 // const User = require("./models/UserModel");
 
 // Load logo for PDF reports
@@ -495,9 +497,9 @@ app.post("/forgot-password", async (req, res) => {
 
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
-    // Check if email transporter is configured
-    if (!transporter) {
-      console.error("[FORGOT-PASSWORD] Email transporter not configured. Please set SMTP environment variables.");
+    // Check if email service is configured
+    if (!isEmailConfigured) {
+      console.error("[FORGOT-PASSWORD] Email service not configured. Please set BREVO_API_KEY environment variable.");
       return res.status(503).json({ 
         success: false, 
         message: "Email service is not configured. Please contact support." 
@@ -516,8 +518,7 @@ app.post("/forgot-password", async (req, res) => {
     await user.save();
     console.log("email", email, "otp", otp);
     try {
-      await transporter.sendMail({
-        from: process.env.SMTP_FROM || "sagealpha.ai@gmail.com",
+      await sendEmail({
         to: email,
         subject: "Password Reset OTP - SageAlpha",
         html: `
@@ -527,20 +528,12 @@ app.post("/forgot-password", async (req, res) => {
             <h1 style="color:#007bff">${otp}</h1>
             <p>This OTP is valid for <strong>${otpExpiryMinutes} minutes</strong>.</p>
           </div>
-        `,
+        `
       });
       console.log(`[FORGOT-PASSWORD] OTP sent successfully to ${email}`);
       return res.json({ success: true, message: "OTP sent to email" });
     } catch (emailError) {
       console.error("[FORGOT-PASSWORD] Email send error:", emailError.message);
-      
-      // Check for specific authentication errors
-      if (emailError.code === 'EAUTH') {
-        return res.status(500).json({ 
-          success: false, 
-          message: "Email authentication failed. Please check SMTP configuration." 
-        });
-      }
       
       // Generic email error
       return res.status(500).json({ 
@@ -1840,7 +1833,6 @@ app.post("/reports/send", loginRequired, async (req, res) => {
   const { subscriber_emails, reports } = req.body;
   const userId = req.user._id ? req.user._id : req.user.id;
 
-  // Validate input
   if (!subscriber_emails || !Array.isArray(subscriber_emails) || subscriber_emails.length === 0) {
     return res.status(400).json({ error: "At least one subscriber email is required" });
   }
@@ -1849,35 +1841,34 @@ app.post("/reports/send", loginRequired, async (req, res) => {
     return res.status(400).json({ error: "At least one report is required" });
   }
 
-  // Check if email is configured
-  if (!transporter) {
-    return res.status(500).json({ error: "Email service is not configured. Please contact administrator." });
+  // Check if email service is configured
+  if (!isEmailConfigured) {
+    return res.status(500).json({ error: "Email service not configured (BREVO_API_KEY missing)" });
   }
 
-  try {
-    const results = [];
-    const errors = [];
+  const results = [];
+  const errors = [];
 
-    // Process each subscriber
+  try {
     for (const subscriberEmail of subscriber_emails) {
-      // Validate email format
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(subscriberEmail)) {
         errors.push({ email: subscriberEmail, error: "Invalid email format" });
         continue;
       }
 
-      // Verify subscriber belongs to user (optional security check)
-      let subscriber = null;
+      // Fetch subscriber
+      let subscriber;
       if (mongooseConnected) {
-        subscriber = await Subscriber.findOne({ 
-          user_id: userId, 
+        subscriber = await Subscriber.findOne({
+          user_id: userId,
           email: subscriberEmail.toLowerCase().trim(),
-          is_active: true 
+          is_active: true
         });
       } else {
-        subscriber = db.prepare("SELECT * FROM subscribers WHERE user_id = ? AND email = ? AND is_active = 1")
-          .get(userId, subscriberEmail.toLowerCase().trim());
+        subscriber = db.prepare(
+          "SELECT * FROM subscribers WHERE user_id = ? AND email = ? AND is_active = 1"
+        ).get(userId, subscriberEmail.toLowerCase().trim());
       }
 
       if (!subscriber) {
@@ -1885,136 +1876,81 @@ app.post("/reports/send", loginRequired, async (req, res) => {
         continue;
       }
 
-      // Process each report for this subscriber
       for (const reportData of reports) {
         try {
-          // Extract report ID from reportData (could be report_data or _id)
-          const reportId = reportData.report_data || reportData._id?.toString() || reportData.id?.toString();
-          
+          const reportId =
+            reportData.report_data ||
+            reportData._id?.toString() ||
+            reportData.id?.toString();
+
           if (!reportId) {
-            errors.push({
-              email: subscriberEmail,
-              report: reportData.title || "Unknown",
-              error: "Report ID not found"
-            });
+            errors.push({ email: subscriberEmail, error: "Report ID missing" });
             continue;
           }
 
-          // Get report HTML from Azure Blob Storage
-          let pdfBuffer;
-          try {
-            // Sanitize report ID to match the file naming convention used when saving
-            const safeReportId = String(reportId).replace(/[^\w\-_]/g, "_");
-            
-            // Get HTML content from Azure Blob Storage
-            const htmlContent = await getHtmlFromBlob(safeReportId);
-            
-            if (!htmlContent) {
-              throw new Error(`Report HTML not found in blob storage for ID: ${safeReportId}`);
-            }
+          // ---------- HTML → PDF ----------
+          const safeReportId = String(reportId).replace(/[^\w\-_]/g, "_");
+          const htmlContent = await getHtmlFromBlob(safeReportId);
 
-            // Validate HTML size (reject > 1.5MB)
-            const sizeValidation = validateHtmlSize(htmlContent);
-            if (!sizeValidation.valid) {
-              throw new Error(`HTML content too large for PDF generation: ${sizeValidation.error}`);
-            }
-
-            // Log HTML size and Base64 image detection
-            console.log(`[Send Report] HTML content size: ${sizeValidation.sizeBytes} bytes (${(sizeValidation.sizeBytes / 1024).toFixed(2)} KB) for report ${safeReportId}`);
-            detectBase64Images(htmlContent);
-
-            // Convert HTML to PDF (HTML passed exactly as received, no modification)
-            console.log(`[Send Report] Converting HTML to PDF for report ${safeReportId} (HTML passed unchanged to PDF generator)`);
-            pdfBuffer = await convertHtmlToPdf(htmlContent);
-          } catch (fileError) {
-            console.error(`[Send Report] Error reading PDF for report ${reportId}:`, fileError);
-            errors.push({ 
-              email: subscriberEmail, 
-              report: reportData.title || reportData.company_name || "Unknown",
-              error: `Failed to read report PDF: ${fileError.message}` 
-            });
-            continue;
+          if (!htmlContent) {
+            throw new Error("Report HTML not found in blob storage");
           }
 
-          // Prepare email content
-          const companyName = reportData.company_name || reportData.title?.replace("Equity Research Note – ", "").trim() || "Company";
-          const reportTitle = reportData.title || `Equity Research Report - ${companyName}`;
-          
-          const mailOptions = {
-            from: process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@sagealpha.ai",
+          // Validate HTML size (reject > 1.5MB)
+          const sizeValidation = validateHtmlSize(htmlContent);
+          if (!sizeValidation.valid) {
+            throw new Error(`HTML content too large for PDF generation: ${sizeValidation.error}`);
+          }
+
+          // Log HTML size and Base64 image detection
+          console.log(`[Send Report] HTML content size: ${sizeValidation.sizeBytes} bytes (${(sizeValidation.sizeBytes / 1024).toFixed(2)} KB) for report ${safeReportId}`);
+          detectBase64Images(htmlContent);
+
+          // Convert HTML to PDF (HTML passed exactly as received, no modification)
+          console.log(`[Send Report] Converting HTML to PDF for report ${safeReportId} (HTML passed unchanged to PDF generator)`);
+          const pdfBuffer = await convertHtmlToPdf(htmlContent);
+
+          // ---------- Email content ----------
+          const companyName =
+            reportData.company_name ||
+            reportData.title?.replace("Equity Research Note – ", "").trim() ||
+            "Company";
+
+          const reportTitle =
+            reportData.title || `Equity Research Report - ${companyName}`;
+
+          // ---------- SEND EMAIL (using new email service) ----------
+          await sendEmail({
             to: subscriberEmail,
             subject: `📊 ${reportTitle} - SageAlpha Research`,
             html: `
-              <!DOCTYPE html>
-              <html>
-              <head>
-                <meta charset="utf-8">
-                <style>
-                  body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-                  .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-                  .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-                  .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }
-                  .button { display: inline-block; padding: 12px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin-top: 20px; }
-                  .footer { text-align: center; margin-top: 20px; color: #666; font-size: 12px; }
-                </style>
-              </head>
-              <body>
-                <div class="container">
-                  <div class="header">
-                    <h1>📊 SageAlpha Research Report</h1>
-                  </div>
-                  <div class="content">
-                    <p>Dear ${subscriber.name || 'Valued Subscriber'},</p>
-                    <p>We are pleased to share with you our latest equity research report:</p>
-                    <h2>${reportTitle}</h2>
-                    <p>This comprehensive report contains detailed analysis, financial insights, and investment recommendations for <strong>${companyName}</strong>.</p>
-                    <p>The PDF report is attached to this email for your review.</p>
-                    <p>If you have any questions or need further assistance, please don't hesitate to contact us.</p>
-                    <p>Best regards,<br><strong>SageAlpha Research Team</strong></p>
-                  </div>
-                  <div class="footer">
-                    <p>This email was sent by SageAlpha. Please do not reply to this email.</p>
-                  </div>
-                </div>
-              </body>
-              </html>
+              <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <p>Dear ${subscriber.name || "Subscriber"},</p>
+                <p>Please find attached our latest equity research report:</p>
+                <h3>${reportTitle}</h3>
+                <p>Company: <strong>${companyName}</strong></p>
+                <p>Regards,<br><strong>SageAlpha Research Team</strong></p>
+              </div>
             `,
             attachments: [
               {
-                filename: `SageAlpha_${companyName.replace(/[^a-zA-Z0-9]/g, '_')}_Report.pdf`,
-                content: pdfBuffer,
-                contentType: 'application/pdf'
+                filename: `SageAlpha_${companyName.replace(/[^a-zA-Z0-9]/g, "_")}_Report.pdf`,
+                content: pdfBuffer
               }
             ]
-          };
+          });
 
-          // Send email
-          await transporter.sendMail(mailOptions);
-          
-          // Save delivery record to database
+          // ---------- SAVE DELIVERY ----------
           try {
-            // Find the report document
-            // reportId comes from reportData.report_data OR reportData._id
-            // reportData._id is the MongoDB ObjectId of the Report document
             let reportDoc = null;
-            
-            // First, try to find by _id (MongoDB ObjectId) - this is the most reliable
+
             if (mongooseConnected) {
               if (reportData._id) {
-                try {
-                  const mongoose = require('mongoose');
-                  if (mongoose.Types.ObjectId.isValid(reportData._id)) {
-                    reportDoc = await Report.findOne({
-                      _id: reportData._id,
-                      user_id: userId
-                    });
-                  }
-                } catch (idError) {
-                  console.warn(`[Send Report] Invalid ObjectId format: ${reportData._id}`, idError);
-                }
+                reportDoc = await Report.findOne({
+                  _id: reportData._id,
+                  user_id: userId
+                });
               }
-              
-              // If not found by _id, try by report_data (file identifier)
               if (!reportDoc && reportId) {
                 reportDoc = await Report.findOne({
                   report_data: reportId,
@@ -2022,123 +1958,67 @@ app.post("/reports/send", loginRequired, async (req, res) => {
                 });
               }
             } else {
-              // SQLite fallback - try by id first
-              if (reportData._id) {
-                reportDoc = db.prepare("SELECT * FROM reports WHERE id = ? AND user_id = ?")
-                  .get(reportData._id, userId);
-              }
-              
-              // If not found, try by report_data
-              if (!reportDoc && reportId) {
-                reportDoc = db.prepare("SELECT * FROM reports WHERE report_data = ? AND user_id = ?")
-                  .get(reportId, userId);
-              }
+              reportDoc = db.prepare(
+                "SELECT * FROM reports WHERE report_data = ? AND user_id = ?"
+              ).get(reportId, userId);
             }
 
             if (reportDoc) {
               const subscriberId = subscriber._id || subscriber.id;
               const reportDocId = reportDoc._id || reportDoc.id;
-              
-              if (!subscriberId) {
-                console.error(`[Send Report] Subscriber ID missing for ${subscriberEmail}`);
-              } else if (!reportDocId) {
-                console.error(`[Send Report] Report document ID missing for report ${reportId}`);
+
+              if (mongooseConnected) {
+                await ReportDelivery.create({
+                  subscriber_id: subscriberId,
+                  report_id: reportDocId,
+                  user_id: userId
+                });
               } else {
-                if (mongooseConnected) {
-                  await ReportDelivery.create({
-                    subscriber_id: subscriberId,
-                    report_id: reportDocId,
-                    user_id: userId
-                  });
-                  console.log(`[Send Report] ✓ Saved delivery record: subscriber=${subscriberId}, report=${reportDocId}, email=${subscriberEmail}`);
-                } else {
-                  // SQLite fallback - check if table exists first
-                  try {
-                    db.prepare(`
-                      INSERT INTO report_deliveries (subscriber_id, report_id, user_id, sent_at)
-                      VALUES (?, ?, ?, datetime('now'))
-                    `).run(subscriberId, reportDocId, userId);
-                    console.log(`[Send Report] ✓ Saved delivery record: subscriber=${subscriberId}, report=${reportDocId}, email=${subscriberEmail}`);
-                  } catch (sqlError) {
-                    // Table might not exist, create it
-                    if (sqlError.message.includes('no such table')) {
-                      db.prepare(`
-                        CREATE TABLE IF NOT EXISTS report_deliveries (
-                          id INTEGER PRIMARY KEY AUTOINCREMENT,
-                          subscriber_id TEXT NOT NULL,
-                          report_id TEXT NOT NULL,
-                          user_id TEXT NOT NULL,
-                          sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                        )
-                      `).run();
-                      db.prepare(`
-                        INSERT INTO report_deliveries (subscriber_id, report_id, user_id, sent_at)
-                        VALUES (?, ?, ?, datetime('now'))
-                      `).run(subscriberId, reportDocId, userId);
-                      console.log(`[Send Report] ✓ Created table and saved delivery record: subscriber=${subscriberId}, report=${reportDocId}`);
-                    } else {
-                      throw sqlError;
-                    }
-                  }
-                }
+                db.prepare(`
+                  INSERT INTO report_deliveries (subscriber_id, report_id, user_id, sent_at)
+                  VALUES (?, ?, ?, datetime('now'))
+                `).run(subscriberId, reportDocId, userId);
               }
-            } else {
-              console.warn(`[Send Report] ⚠ Report document not found:`, {
-                reportId: reportId,
-                reportData_id: reportData._id,
-                reportData: JSON.stringify(reportData, null, 2)
-              });
             }
-          } catch (deliveryError) {
-            // Log error but don't fail the send operation
-            console.error(`[Send Report] ❌ Error saving delivery record:`, deliveryError);
-            console.error(`[Send Report] Error details:`, {
-              message: deliveryError.message,
-              stack: deliveryError.stack,
-              reportId: reportId,
-              reportData_id: reportData._id,
-              subscriberId: subscriber._id || subscriber.id,
-              subscriberEmail: subscriberEmail
-            });
+          } catch (dbErr) {
+            console.error("[Send Report] Delivery save failed:", dbErr.message);
           }
-          
+
           results.push({
             email: subscriberEmail,
             report: reportTitle,
-            company: companyName,
             status: "sent"
           });
 
-          console.log(`[Send Report] ✓ Sent report "${reportTitle}" to ${subscriberEmail}`);
+          console.log(`[Send Report] ✓ Sent ${reportTitle} to ${subscriberEmail}`);
 
-        } catch (emailError) {
-          console.error(`[Send Report] Error sending email to ${subscriberEmail}:`, emailError);
+        } catch (sendErr) {
+          console.error("[Send Report] Email send error:", sendErr);
           errors.push({
             email: subscriberEmail,
-            report: reportData.title || reportData.company_name || "Unknown",
-            error: emailError.message || "Failed to send email"
+            error: sendErr.message || "Email send failed"
           });
         }
       }
     }
 
-    // Return results
     return res.json({
       success: true,
       sent: results.length,
       failed: errors.length,
-      results: results,
-      errors: errors.length > 0 ? errors : undefined
+      results,
+      errors: errors.length ? errors : undefined
     });
 
-  } catch (error) {
-    console.error("[Send Report] Unexpected error:", error);
-    return res.status(500).json({ 
-      error: "Failed to send reports", 
-      message: error.message 
+  } catch (err) {
+    console.error("[Send Report] Fatal error:", err);
+    return res.status(500).json({
+      error: "Failed to send reports",
+      message: err.message
     });
   }
 });
+
 
 // Get report history for a subscriber
 app.get("/subscribers/:id/history", loginRequired, async (req, res) => {
