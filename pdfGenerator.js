@@ -17,17 +17,25 @@ const execAsync = promisify(exec);
 function getWkhtmltopdfPath() {
   const log = (msg) => console.warn(`[WKHTMLTOPDF] ${msg}`);
 
-  // 1️⃣ Check for custom environment variable
+  const platform = os.platform();
+
+  // 1️⃣ Check for custom environment variable (but verify it exists)
   if (process.env.WKHTMLTOPDF_PATH) {
     const customPath = process.env.WKHTMLTOPDF_PATH.trim();
-    if (fs.existsSync(customPath)) {
-      log(`Using custom path: ${customPath}`);
+    // Only use custom path if file actually exists (for absolute paths)
+    if (customPath.startsWith('/') || customPath.startsWith('C:') || customPath.includes('\\')) {
+      if (fs.existsSync(customPath)) {
+        log(`Using custom path: ${customPath}`);
+        return customPath;
+      } else {
+        log(`Custom path set but file not found: ${customPath}, will try standard locations`);
+      }
+    } else {
+      // Relative path or PATH command - trust it
+      log(`Using custom path (will use PATH): ${customPath}`);
       return customPath;
     }
-    log(`Custom path set but not found: ${customPath}`);
   }
-
-  const platform = os.platform();
 
   // 2️⃣ Windows paths
   if (platform === "win32") {
@@ -39,32 +47,40 @@ function getWkhtmltopdfPath() {
     ];
 
     for (const p of windowsPaths) {
-      if (fs.existsSync(p)) {
-        log(`Detected Windows binary at: ${p}`);
+      if (p === "wkhtmltopdf.exe" || fs.existsSync(p)) {
+        if (fs.existsSync(p)) {
+          log(`Detected Windows binary at: ${p}`);
+        }
         return p;
       }
     }
   } 
   else {
-    // 3️⃣ Linux / Render paths
+    // 3️⃣ Linux / Render paths (check standard locations first)
     const linuxPaths = [
-      "/usr/local/bin/wkhtmltopdf",
-      "/usr/bin/wkhtmltopdf",
+      "/usr/bin/wkhtmltopdf",        // Standard Debian/Ubuntu location (Render uses this)
+      "/usr/local/bin/wkhtmltopdf",  // Alternative location
       path.join(process.cwd(), "bin/wkhtmltopdf"),
-      "wkhtmltopdf",
+      "wkhtmltopdf",                 // PATH fallback
     ];
 
     for (const p of linuxPaths) {
-      // Skip PATH-only entries for existence check
-      if (p.startsWith("/") && fs.existsSync(p)) {
-        log(`Detected Linux binary at: ${p}`);
+      // For absolute paths, check if file exists
+      if (p.startsWith("/")) {
+        if (fs.existsSync(p)) {
+          log(`Detected Linux binary at: ${p}`);
+          return p;
+        }
+      } else {
+        // For PATH-only entries, return as-is (will be verified later)
+        log(`Using PATH lookup: ${p}`);
         return p;
       }
     }
   }
 
   // 4️⃣ PATH fallback (final fallback)
-  log("Binary not found, using PATH fallback: wkhtmltopdf");
+  log("Using PATH fallback: wkhtmltopdf");
   return "wkhtmltopdf";
 }
 
