@@ -820,8 +820,8 @@ The output must be ONLY a valid JSON object matching this structure:
   "targetPeriod": "12-18M",
   "currentPrice": "INRPrice",
   "upside": "+X%",
-  "marketCap": "INRX bn",
-  "entValue": "INRX bn",
+  "marketCap": "INRX",
+  "entValue": "INRX",
   "evEbitda": "X.x",
   "pe": "X.x",
   "investmentThesis": [
@@ -1565,6 +1565,42 @@ app.post("/upload", loginRequired, upload.single("file"), (req, res) => {
 });
 
 
+/**
+ * Validate HTML size for PDF generation
+ * @param {string} htmlContent - HTML content to validate
+ * @param {number} maxSizeBytes - Maximum size in bytes (default: 1.5MB)
+ * @returns {Object} { valid: boolean, sizeBytes: number, error?: string }
+ */
+function validateHtmlSize(htmlContent, maxSizeBytes = 1.5 * 1024 * 1024) {
+  const sizeBytes = Buffer.byteLength(htmlContent, 'utf8');
+  if (sizeBytes > maxSizeBytes) {
+    return {
+      valid: false,
+      sizeBytes,
+      error: `HTML content exceeds maximum size of ${maxSizeBytes} bytes (${(maxSizeBytes / 1024 / 1024).toFixed(2)}MB). Actual size: ${sizeBytes} bytes (${(sizeBytes / 1024 / 1024).toFixed(2)}MB)`
+    };
+  }
+  return { valid: true, sizeBytes };
+}
+
+/**
+ * Detect and log Base64 images in HTML
+ * @param {string} htmlContent - HTML content to analyze
+ * @returns {number} Number of Base64 images detected
+ */
+function detectBase64Images(htmlContent) {
+  // Match img tags with data:image base64 src
+  const base64ImagePattern = /<img[^>]*src=["']data:image\/[^;]+;base64,[^"']+["'][^>]*>/gi;
+  const matches = htmlContent.match(base64ImagePattern);
+  const count = matches ? matches.length : 0;
+  
+  if (count > 0) {
+    console.log(`[PDF] Detected ${count} Base64 image(s) in HTML content`);
+  }
+  
+  return count;
+}
+
 app.get("/reports/download/:id", async (req, res) => {
   try {
     const reportId = req.params.id.replace(/[^\w\-_]/g, "_");
@@ -1579,14 +1615,28 @@ app.get("/reports/download/:id", async (req, res) => {
       return res.status(404).json({ error: "Report not found" });
     }
 
-    console.log(`[Download] HTML content retrieved from blob (${htmlContent.length} bytes)`);
-    console.log(`[Download] Converting HTML to PDF`);
+    // Validate HTML size (reject > 1.5MB)
+    const sizeValidation = validateHtmlSize(htmlContent);
+    if (!sizeValidation.valid) {
+      console.error(`[Download] HTML size validation failed: ${sizeValidation.error}`);
+      return res.status(400).json({ 
+        error: "HTML content too large for PDF generation", 
+        message: sizeValidation.error 
+      });
+    }
 
-    // Convert HTML to PDF
+    // Log HTML size and Base64 image detection
+    console.log(`[Download] HTML content size: ${sizeValidation.sizeBytes} bytes (${(sizeValidation.sizeBytes / 1024).toFixed(2)} KB)`);
+    detectBase64Images(htmlContent);
+
+    console.log(`[Download] Converting HTML to PDF (HTML passed unchanged to PDF generator)`);
+
+    // Convert HTML to PDF (HTML passed exactly as received, no modification)
     const pdf = await convertHtmlToPdf(htmlContent);
 
     console.log(`[Download] PDF generated successfully (${pdf.length} bytes)`);
 
+    // Set correct response headers
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
@@ -1635,7 +1685,6 @@ app.get("/reports/html/:id", async (req, res) => {
 
 
 // Preview endpoint - serves PDF inline for preview
-// Preview endpoint - serves PDF inline for preview
 app.get("/reports/preview/:id", async (req, res) => {
   try {
     const reportId = req.params.id.replace(/[^\w\-_]/g, "_");
@@ -1647,9 +1696,24 @@ app.get("/reports/preview/:id", async (req, res) => {
       return res.status(404).json({ error: "Report not found" });
     }
 
-    console.log("[Preview] Converting HTML to PDF from blob");
+    // Validate HTML size (reject > 1.5MB)
+    const sizeValidation = validateHtmlSize(htmlContent);
+    if (!sizeValidation.valid) {
+      console.error(`[Preview] HTML size validation failed: ${sizeValidation.error}`);
+      return res.status(400).json({ 
+        error: "HTML content too large for PDF generation", 
+        message: sizeValidation.error 
+      });
+    }
+
+    // Log HTML size and Base64 image detection
+    console.log(`[Preview] HTML content size: ${sizeValidation.sizeBytes} bytes (${(sizeValidation.sizeBytes / 1024).toFixed(2)} KB)`);
+    detectBase64Images(htmlContent);
+
+    console.log("[Preview] Converting HTML to PDF from blob (HTML passed unchanged to PDF generator)");
     const pdfBuffer = await convertHtmlToPdf(htmlContent);
 
+    // Set correct response headers
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `inline; filename="SageAlpha_${reportId}.pdf"`);
     res.send(pdfBuffer);
@@ -1849,8 +1913,18 @@ app.post("/reports/send", loginRequired, async (req, res) => {
               throw new Error(`Report HTML not found in blob storage for ID: ${safeReportId}`);
             }
 
-            // Convert HTML to PDF
-            console.log(`[Send Report] Converting HTML to PDF for report ${safeReportId}`);
+            // Validate HTML size (reject > 1.5MB)
+            const sizeValidation = validateHtmlSize(htmlContent);
+            if (!sizeValidation.valid) {
+              throw new Error(`HTML content too large for PDF generation: ${sizeValidation.error}`);
+            }
+
+            // Log HTML size and Base64 image detection
+            console.log(`[Send Report] HTML content size: ${sizeValidation.sizeBytes} bytes (${(sizeValidation.sizeBytes / 1024).toFixed(2)} KB) for report ${safeReportId}`);
+            detectBase64Images(htmlContent);
+
+            // Convert HTML to PDF (HTML passed exactly as received, no modification)
+            console.log(`[Send Report] Converting HTML to PDF for report ${safeReportId} (HTML passed unchanged to PDF generator)`);
             pdfBuffer = await convertHtmlToPdf(htmlContent);
           } catch (fileError) {
             console.error(`[Send Report] Error reading PDF for report ${reportId}:`, fileError);
