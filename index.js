@@ -500,9 +500,9 @@ app.post("/forgot-password", async (req, res) => {
     // Check if email service is configured
     if (!isEmailConfigured) {
       console.error("[FORGOT-PASSWORD] Email service not configured. Please set BREVO_API_KEY environment variable.");
-      return res.status(503).json({ 
-        success: false, 
-        message: "Email service is not configured. Please contact support." 
+      return res.status(503).json({
+        success: false,
+        message: "Email service is not configured. Please contact support."
       });
     }
 
@@ -534,11 +534,11 @@ app.post("/forgot-password", async (req, res) => {
       return res.json({ success: true, message: "OTP sent to email" });
     } catch (emailError) {
       console.error("[FORGOT-PASSWORD] Email send error:", emailError.message);
-      
+
       // Generic email error
-      return res.status(500).json({ 
-        success: false, 
-        message: "Failed to send email. Please try again later or contact support." 
+      return res.status(500).json({
+        success: false,
+        message: "Failed to send email. Please try again later or contact support."
       });
     }
 
@@ -787,7 +787,11 @@ async function chatCompletion(messages) {
   const resp = await llmClient.chat.completions.create({
     model: model,
     messages: messages,
-    temperature: 0.1
+    temperature: 0.5,
+    max_tokens: 1500,
+    top_p: 1,
+    frequency_penalty: 0,
+    presence_penalty: 0
   });
   return resp.choices[0].message.content;
 }
@@ -982,7 +986,7 @@ If context is empty or irrelevant, answer from knowledge. Be precise.`;
   } catch (e) {
     console.error("Chat error:", e);
     res.status(500).json({ error: e.message });
-  }                                                                          
+  }
 });
 
 // ==========================================
@@ -1218,8 +1222,8 @@ app.put("/subscribers/:id", loginRequired, async (req, res) => {
       }
 
       // Check for duplicate email (excluding current subscriber)
-      const existing = await Subscriber.findOne({ 
-        user_id: userId, 
+      const existing = await Subscriber.findOne({
+        user_id: userId,
         email: email.toLowerCase().trim(),
         _id: { $ne: id }
       });
@@ -1387,6 +1391,63 @@ app.post("/sessions/:id/delete", loginRequired, async (req, res) => {
   res.status(500).json({ error: "Database not connected" });
 });
 
+app.post("/chat/clear-all", loginRequired, async (req, res) => {
+  const userId = req.user._id ? req.user._id : req.user.id;
+
+  if (mongooseConnected) {
+    try {
+      // Delete all messages for this user
+      await Message.deleteMany({ user_id: userId });
+
+      // Delete all chat sessions for this user
+      await ChatSession.deleteMany({ user_id: userId });
+
+      return res.json({ success: true, message: "All chat history cleared successfully" });
+    } catch (error) {
+      console.error("Error clearing chat history:", error);
+      return res.status(500).json({ error: "Failed to clear chat history" });
+    }
+  }
+
+  res.status(500).json({ error: "Database not connected" });
+});
+
+app.post("/reports/delete-all", loginRequired, async (req, res) => {
+  const userId = req.user._id ? req.user._id : req.user.id;
+
+  if (mongooseConnected) {
+    try {
+      // Get all reports for this user
+      const reports = await Report.find({ user_id: userId }).lean();
+
+      // Delete all blob storage files for these reports
+      for (const report of reports) {
+        if (report.report_data) {
+          try {
+            await deleteHtmlFromBlob(report.report_data);
+          } catch (blobErr) {
+            console.warn("[Report] Failed to delete blob:", blobErr.message);
+            // Continue with DB deletion even if blob deletion fails
+          }
+        }
+      }
+
+      // Delete all reports from database
+      await Report.deleteMany({ user_id: userId });
+
+      // Delete all portfolio items for this user
+      await PortfolioItem.deleteMany({ user_id: userId });
+
+      return res.json({ success: true, message: "All reports and portfolio items deleted successfully" });
+    } catch (error) {
+      console.error("Error deleting reports and portfolio:", error);
+      return res.status(500).json({ error: "Failed to delete reports and portfolio" });
+    }
+  }
+
+  res.status(500).json({ error: "Database not connected" });
+});
+
 app.post("/sessions/:id/share", loginRequired, async (req, res) => {
   const userId = req.user._id ? req.user._id : req.user.id;
   const { id } = req.params;
@@ -1448,7 +1509,7 @@ app.post("/chat/create-report", loginRequired, async (req, res) => {
         report_date: new Date(),
         created_at: new Date()
       });
-    
+
 
       // Save chat history
       if (!session_id) {
@@ -1586,12 +1647,40 @@ function detectBase64Images(htmlContent) {
   const base64ImagePattern = /<img[^>]*src=["']data:image\/[^;]+;base64,[^"']+["'][^>]*>/gi;
   const matches = htmlContent.match(base64ImagePattern);
   const count = matches ? matches.length : 0;
-  
+
   if (count > 0) {
     console.log(`[PDF] Detected ${count} Base64 image(s) in HTML content`);
   }
-  
+
   return count;
+}
+
+/**
+ * Strip all HTML tags and return only text content
+ * @param {string} htmlContent - HTML content to strip
+ * @returns {string} Plain text content without HTML tags
+ */
+function stripHtmlTags(htmlContent) {
+  // Remove script and style elements and their content
+  let text = htmlContent.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+  text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+
+  // Replace HTML entities
+  text = text.replace(/&nbsp;/g, ' ');
+  text = text.replace(/&amp;/g, '&');
+  text = text.replace(/&lt;/g, '<');
+  text = text.replace(/&gt;/g, '>');
+  text = text.replace(/&quot;/g, '"');
+  text = text.replace(/&#39;/g, "'");
+
+  // Remove all HTML tags
+  text = text.replace(/<[^>]+>/g, '');
+
+  // Clean up whitespace - replace multiple spaces/newlines with single space
+  text = text.replace(/\s+/g, ' ');
+
+  // Trim and return
+  return text.trim();
 }
 
 app.get("/reports/download/:id", async (req, res) => {
@@ -1602,7 +1691,7 @@ app.get("/reports/download/:id", async (req, res) => {
 
     // Get HTML content from Azure Blob Storage
     const htmlContent = await getHtmlFromBlob(reportId);
-    
+
     if (!htmlContent) {
       console.error(`[Download] HTML blob not found for report ID: ${reportId}`);
       return res.status(404).json({ error: "Report not found" });
@@ -1612,9 +1701,9 @@ app.get("/reports/download/:id", async (req, res) => {
     const sizeValidation = validateHtmlSize(htmlContent);
     if (!sizeValidation.valid) {
       console.error(`[Download] HTML size validation failed: ${sizeValidation.error}`);
-      return res.status(400).json({ 
-        error: "HTML content too large for PDF generation", 
-        message: sizeValidation.error 
+      return res.status(400).json({
+        error: "HTML content too large for PDF generation",
+        message: sizeValidation.error
       });
     }
 
@@ -1635,15 +1724,15 @@ app.get("/reports/download/:id", async (req, res) => {
       "Content-Disposition",
       `attachment; filename="SageAlpha_${reportId}.pdf"`
     );
-    
+
     return res.send(pdf);
 
   } catch (err) {
     console.error("[Download] Endpoint Error:", err.message);
     console.error("[Download] Error stack:", err.stack);
-    return res.status(500).json({ 
-      error: "PDF generation failed", 
-      message: err.message 
+    return res.status(500).json({
+      error: "PDF generation failed",
+      message: err.message
     });
   }
 });
@@ -1655,20 +1744,20 @@ app.get("/reports/download/:id", async (req, res) => {
 app.get("/reports/html/:id", async (req, res) => {
   try {
     const reportId = req.params.id.replace(/[^\w\-_]/g, "_");
-    
+
     // Get HTML content from Azure Blob Storage
     const htmlContent = await getHtmlFromBlob(reportId);
-    
+
     if (!htmlContent) {
       return res.status(404).send("Report not found");
     }
-    
+
     // Disable caching to ensure we always serve the latest version
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    
+
     res.send(htmlContent);
   } catch (err) {
     console.error("[HTML] Error serving file:", err.message);
@@ -1684,7 +1773,7 @@ app.get("/reports/preview/:id", async (req, res) => {
 
     // Get HTML content from Azure Blob Storage
     const htmlContent = await getHtmlFromBlob(reportId);
-    
+
     if (!htmlContent) {
       return res.status(404).json({ error: "Report not found" });
     }
@@ -1693,9 +1782,9 @@ app.get("/reports/preview/:id", async (req, res) => {
     const sizeValidation = validateHtmlSize(htmlContent);
     if (!sizeValidation.valid) {
       console.error(`[Preview] HTML size validation failed: ${sizeValidation.error}`);
-      return res.status(400).json({ 
-        error: "HTML content too large for PDF generation", 
-        message: sizeValidation.error 
+      return res.status(400).json({
+        error: "HTML content too large for PDF generation",
+        message: sizeValidation.error
       });
     }
 
@@ -1724,9 +1813,9 @@ app.get("/reports/edit/:id", loginRequired, async (req, res) => {
     const reportId = req.params.id.replace(/[^\w\-_]/g, "_");
 
     const userId = req.user._id ? req.user._id : req.user.id;
-    const report = await Report.findOne({ 
-      report_data: reportId, 
-      user_id: userId 
+    const report = await Report.findOne({
+      report_data: reportId,
+      user_id: userId
     });
 
     if (!report) {
@@ -1739,18 +1828,25 @@ app.get("/reports/edit/:id", loginRequired, async (req, res) => {
       return res.status(404).json({ error: "Report HTML not found in storage" });
     }
 
-    // Strip everything outside <body>
+    // Extract only the body content (everything between <body> and </body> tags)
+    // This removes <html>, <head>, and <body> wrapper tags but preserves the HTML structure
     const bodyMatch = fullHtml.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-    const previewHtml = bodyMatch ? bodyMatch[1] : fullHtml;
+    const bodyContent = bodyMatch ? bodyMatch[1] : fullHtml;
+
+    // Return the body HTML content (with structure) for editing
+    // Users can edit the HTML structure, and when they save, we'll wrap it with head/styles
+    const trimmedBodyContent = bodyContent.trim();
+
+    console.log(`[Edit] Extracted body HTML content for editing (${trimmedBodyContent.length} characters)`);
 
     res.json({
-      html: previewHtml,  // Send only body content
+      html: trimmedBodyContent,  // Send body HTML content (with structure, but no <html>/<head>/<body> tags)
       reportId
     });
 
   } catch (err) {
-    console.error("[Preview] Error:", err.message);
-    res.status(500).json({ error: "Error generating preview" });
+    console.error("[Edit] Error reading HTML:", err.message);
+    res.status(500).json({ error: "Error reading report HTML" });
   }
 });
 
@@ -1767,7 +1863,7 @@ app.put("/reports/edit/:id", loginRequired, async (req, res) => {
     }
 
     const userId = req.user._id ? req.user._id : req.user.id;
-    const report = await Report.findOne({ 
+    const report = await Report.findOne({
       report_data: reportId,
       user_id: userId
     });
@@ -1785,11 +1881,11 @@ app.put("/reports/edit/:id", loginRequired, async (req, res) => {
     // Extract head section (including styles) from original HTML
     const headMatch = originalHtml.match(/<head[^>]*>([\s\S]*?)<\/head>/i);
     const headContent = headMatch ? headMatch[1] : '<meta charset="UTF-8">';
-    
+
     // Extract html tag attributes (like lang="en") if present
     const htmlTagMatch = originalHtml.match(/<html\s+([^>]*)>/i);
     const htmlAttributes = htmlTagMatch && htmlTagMatch[1].trim() ? htmlTagMatch[1] : 'lang="en"';
-    
+
     // Extract DOCTYPE if present
     const doctypeMatch = originalHtml.match(/<!DOCTYPE[^>]*>/i);
     const doctype = doctypeMatch ? doctypeMatch[0] : '<!DOCTYPE html>';
@@ -2051,10 +2147,10 @@ app.get("/subscribers/:id/history", loginRequired, async (req, res) => {
     // Verify subscriber belongs to user
     let subscriber = null;
     if (mongooseConnected) {
-      subscriber = await Subscriber.findOne({ 
-        _id: subscriberId, 
+      subscriber = await Subscriber.findOne({
+        _id: subscriberId,
         user_id: userId,
-        is_active: true 
+        is_active: true
       });
     } else {
       subscriber = db.prepare("SELECT * FROM subscribers WHERE _id = ? AND user_id = ? AND is_active = 1")
@@ -2072,9 +2168,9 @@ app.get("/subscribers/:id/history", loginRequired, async (req, res) => {
         subscriber_id: subscriberId,
         user_id: userId
       })
-      .populate('report_id', 'title report_data company_name status')
-      .sort({ sent_at: -1 })
-      .lean();
+        .populate('report_id', 'title report_data company_name status')
+        .sort({ sent_at: -1 })
+        .lean();
     } else {
       // SQLite fallback
       deliveries = db.prepare(`
@@ -2088,14 +2184,14 @@ app.get("/subscribers/:id/history", loginRequired, async (req, res) => {
 
     // Format the response
     const history = deliveries.map(delivery => {
-      const report = mongooseConnected ? delivery.report_id : { 
+      const report = mongooseConnected ? delivery.report_id : {
         title: delivery.title,
         report_data: delivery.report_data,
         status: delivery.status
       };
-      
+
       const companyName = report?.title?.replace("Equity Research Note – ", "").trim() || "Unknown Company";
-      
+
       // Handle date - sent_at is the createdAt timestamp in the schema
       let sentDate = delivery.sent_at || delivery.created_at;
       if (mongooseConnected && sentDate) {
@@ -2103,7 +2199,7 @@ app.get("/subscribers/:id/history", loginRequired, async (req, res) => {
       } else if (!sentDate) {
         sentDate = new Date().toISOString();
       }
-      
+
       return {
         id: delivery._id?.toString() || delivery.id?.toString() || delivery._id || delivery.id,
         company_name: companyName,
@@ -2114,7 +2210,7 @@ app.get("/subscribers/:id/history", loginRequired, async (req, res) => {
       };
     });
 
-    res.json({ 
+    res.json({
       success: true,
       history,
       subscriber: {
